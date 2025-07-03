@@ -218,13 +218,13 @@ def calculate_bias_signals(
             female_probs = F.softmax(female_logits, dim=-1).squeeze()
             
             # 1. Divergence Bias Signal
-            div_bias = jensenshannon(male_probs.cpu().numpy(), female_probs.cpu().numpy(), base=2)
+            div_bias = jensenshannon(male_probs.cpu().numpy(), female_probs.cpu().numpy(), base=2) / np.log(2) # Normalize to [0,1]
             div_bias_signal.append(float(div_bias) if not np.isnan(div_bias) else 1.0)
 
             # 2. Stereotype Bias Signal
             male_valence = sum(male_probs[i] for i in pos_ids) - sum(male_probs[i] for i in neg_ids)
             female_valence = sum(female_probs[i] for i in pos_ids) - sum(female_probs[i] for i in neg_ids)
-            stereo_bias = abs(male_valence - female_valence)
+            stereo_bias = abs(male_valence - female_valence) / 2.0 # Normalize to [0,1]
             stereo_bias_signal.append(stereo_bias.item())
             
             # Append next token (greedy) to continue generation
