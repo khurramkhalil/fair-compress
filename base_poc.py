@@ -25,7 +25,7 @@ import seaborn as sns
 # BoTorch imports
 import botorch
 from botorch.models import SingleTaskGP
-from botorch.fit import fit_gpytorch_model
+from botorch.fit import fit_gpytorch_mll
 from botorch.acquisition import ExpectedImprovement, ConstrainedExpectedImprovement
 from botorch.optim import optimize_acqf
 from gpytorch.mlls import ExactMarginalLogLikelihood
@@ -584,8 +584,8 @@ class STLFairCompressOptimizer:
                 cost_mll = ExactMarginalLogLikelihood(cost_model.likelihood, cost_model)
                 constraint_mll = ExactMarginalLogLikelihood(constraint_model.likelihood, constraint_model)
                 
-                fit_gpytorch_model(cost_mll)
-                fit_gpytorch_model(constraint_mll)
+                fit_gpytorch_mll(cost_mll)
+                fit_gpytorch_mll(constraint_mll)
                 
                 # Define acquisition function
                 feasible_points = [i for i, c in enumerate(self.Y_constraint) 

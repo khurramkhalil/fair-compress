@@ -27,19 +27,25 @@ from scipy.spatial.distance import jensenshannon
 # BoTorch for Bayesian Optimization
 import botorch
 from botorch.models import SingleTaskGP
-from botorch.fit import fit_gpytorch_model
+from botorch.fit import fit_gpytorch_mll
 from botorch.acquisition import ConstrainedExpectedImprovement
 from botorch.optim import optimize_acqf
 from botorch.models.model_list_gp_regression import ModelListGP
 from botorch.models.transforms.outcome import Standardize
 from gpytorch.mlls.sum_marginal_log_likelihood import SumMarginalLogLikelihood
 
-# RTAMT for STL Evaluation
-import rtamt
+try:
+    # RTAMT for STL Evaluation
+    import rtamt
+    RTAMT_AVAILABLE = True
+except Exception as ImportError:
+    raise ImportError
 
 # Visualization
 import matplotlib.pyplot as plt
 import seaborn as sns
+from base_poc import generate_counterfactual_prompt_pairs, estimate_flops, STLFairCompressOptimizer
+
 
 # Suppress common warnings for cleaner output
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -371,7 +377,7 @@ class FairCompressOptimizer:
             
             model_list = ModelListGP(cost_model, constraint_model)
             mll = SumMarginalLogLikelihood(model_list.likelihood, model_list)
-            fit_gpytorch_model(mll)
+            fit_gpytorch_mll(mll)
 
             # Define acquisition function
             acq_function = ConstrainedExpectedImprovement(
@@ -420,14 +426,15 @@ def main():
     model = GPT2LMHeadModel.from_pretrained(config.model_name).to(config.device)
     tokenizer = GPT2TokenizerFast.from_pretrained(config.model_name)
     tokenizer.pad_token = tokenizer.eos_token
-
+    
     prompt_pairs = generate_counterfactual_prompt_pairs(config.n_prompt_pairs)
     stereotype_ids = get_stereotype_token_ids(tokenizer)
 
     # Evaluate baseline
     baseline_cost = estimate_flops(model) / 1e12
     print(f"Baseline Cost: {baseline_cost:.3f} TFLOPs")
-    baseline_fairness = evaluate_stl_fairness(model, tokenizer, prompt_pairs, stereotype_ids, STLFairCompressOptimizer(model, tokenizer, [], [], config).parsed_stl_specs, config)
+    stl_fair_compress_optim = STLFairCompressOptimizer(model, tokenizer, [], config)#.parsed_stl_specs
+    baseline_fairness = evaluate_stl_fairness(model, tokenizer, prompt_pairs, stereotype_ids, stl_fair_compress_optim, config)
     print(f"Baseline STL Robustness: {baseline_fairness['min_robustness']:.4f}")
 
     # Run optimizer

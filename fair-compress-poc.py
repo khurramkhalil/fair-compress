@@ -4,7 +4,7 @@ FairCompress: STL-Guided Fair LLM Compression
 Version 1.3 - Research-Grade Script with Correct BoTorch API and Fixes
 
 This version fixes API mismatches in BoTorch and uses the recommended
-qLogNoisyExpectedImprovement for better numerical stability.
+qNoisyExpectedImprovement for better numerical stability.
 
 Author: Research Team
 """
@@ -30,7 +30,7 @@ from botorch.models import SingleTaskGP, ModelListGP
 from botorch.models.transforms.outcome import Standardize
 from botorch.optim import optimize_acqf
 from botorch.acquisition.objective import GenericMCObjective
-from botorch.acquisition.monte_carlo import qLogNoisyExpectedImprovement
+from botorch.acquisition.monte_carlo import qNoisyExpectedImprovement
 from gpytorch.mlls.sum_marginal_log_likelihood import SumMarginalLogLikelihood
 from botorch.exceptions import BadInitialCandidatesWarning
 
@@ -65,15 +65,15 @@ class FairCompressConfig:
     n_initial_random: int = 5
     n_prompt_pairs: int = 5
     max_generation_length: int = 20
-    epsilon_div: float = 0.10
-    epsilon_stereo: float = 0.05
+    epsilon_div: float = 0.50
+    epsilon_stereo: float = 0.30
     stl_robustness_threshold: float = 0.0
     bit_options: List[int] = None
     pruning_bounds: Tuple[float, float] = (0.0, 0.5)
     
     def __post_init__(self):
         if self.bit_options is None:
-            self.bit_options = [4, 8, 16]
+            self.bit_options = [14, 15, 16]
 
 config = FairCompressConfig()
 
@@ -217,11 +217,11 @@ def get_objective_and_constraint_callables():
     return GenericMCObjective(objective=obj_callable), [constraint_callable]
 
 def get_next_candidate(model, train_x, bounds, robustness_threshold):
-    """Optimizes the qLogNoisyExpectedImprovement acquisition function."""
+    """Optimizes the qNoisyExpectedImprovement acquisition function."""
     objective_callable, constraints_callable = get_objective_and_constraint_callables()
     
-    # ** FIX 2: Switched to qLogNoisyExpectedImprovement **
-    acq_function = qLogNoisyExpectedImprovement(
+    # ** FIX 2: Switched to qNoisyExpectedImprovement **
+    acq_function = qNoisyExpectedImprovement(
         model=model,
         X_baseline=train_x,
         objective=objective_callable,
