@@ -740,6 +740,20 @@ class ProductionSTLEvaluator:
 # FORCED ALIGNMENT WITH STRESS MONITORING
 # =============================================================================
 
+def calculate_jsd(p, q, base=2, epsilon_div=1e-10):
+    if p is None or q is None or len(p) != len(q): return float('inf') # Indicate error/mismatch
+    p = np.asarray(p) + epsilon_div
+    q = np.asarray(q) + epsilon_div
+    p /= np.sum(p)
+    q /= np.sum(q)
+    m = 0.5 * (p + q)
+    kl_pm = np.sum(p * np.log(p / m + epsilon_div)) # Add epsilon inside log
+    kl_qm = np.sum(q * np.log(q / m + epsilon_div))
+    jsd_val = 0.5 * (kl_pm + kl_qm)
+    if jsd_val < 0: jsd_val = 0.0
+    # JSD definition varies; this matches common information theory def.
+    # Ensure it aligns with robustness interpretation (lower JSD is better)
+    return jsd_val
 class ForcedAlignmentEngine:
     """Production forced alignment with comprehensive stress monitoring."""
     
@@ -812,18 +826,20 @@ class ForcedAlignmentEngine:
                         logger.debug(f"High stress at step {t}: male={stress_male:.2f}, female={stress_female:.2f}")
                         break
                     
-                    # Calculate Top-K JSD
+                    # Calculate Top-K JSD using robust calculation
                     avg_probs = 0.5 * (male_probs + female_probs)
                     top_k_indices = torch.topk(avg_probs, min(self.config.top_k_tokens, len(avg_probs))).indices
                     
                     male_top_k = male_probs[top_k_indices].cpu().numpy()
                     female_top_k = female_probs[top_k_indices].cpu().numpy()
                     
-                    # Normalize
-                    male_top_k = male_top_k / (male_top_k.sum() + 1e-10)
-                    female_top_k = female_top_k / (female_top_k.sum() + 1e-10)
+                    # Use the robust JSD calculation
+                    jsd = calculate_jsd(male_top_k, female_top_k)
                     
-                    jsd = jensenshannon(male_top_k, female_top_k, base=2)
+                    # Handle infinite JSD (calculation failed)
+                    if np.isinf(jsd):
+                        logger.debug(f"Warning: Infinite JSD at step {t}. Skipping step.")
+                        break
                     
                     # Calculate advanced bias signals if enabled
                     if self.config.use_advanced_bias_detection:
