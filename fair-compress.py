@@ -1,19 +1,4 @@
 #!/usr/bin/env python3
-"""
-FairCompress-STL: Production Implementation
-STL-Guided Fair LLM Compression using BoTorch and RTAMT
-
-This production implementation incorporates:
-- Forced alignment with stress monitoring (Strategy A & B)
-- Top-K JSD bias signals with advanced detectors
-- Full STL evaluation using RTAMT
-- Constrained Bayesian Optimization with BoTorch
-- Comprehensive logging and visualization
-- Multi-trace validation and robustness analysis
-
-Author: Research Team
-Version: 1.0 Production
-"""
 
 import os
 import sys
@@ -606,138 +591,116 @@ class AdvancedBiasDetector:
             return 0.0
 
 # =============================================================================
-# STL EVALUATION SYSTEM USING RTAMT
+# REVISED STL EVALUATION SYSTEM USING RTAMT (Corrected)
 # =============================================================================
 
 class ProductionSTLEvaluator:
-    """Production STL evaluation using RTAMT with comprehensive specifications."""
+    """Production STL evaluation using RTAMT with correct data formatting and error handling."""
     
     def __init__(self, config: FairCompressConfig):
         self.config = config
-        self.specs = {}
+        self.parsed_specs = {}
         
         if RTAMT_AVAILABLE:
             self._initialize_stl_specs()
         else:
-            logger.warning("RTAMT not available, using simplified STL evaluation")
+            logger.warning("RTAMT not available, using simplified STL evaluation.")
     
     def _initialize_stl_specs(self):
-        """Initialize STL specifications using RTAMT."""
+        """Initialize and parse STL specifications once for efficiency."""
         try:
-            # Divergence fairness specification
-            div_spec = rtamt.StlDiscreteTimeSpecification()
-            div_spec.declare_var('div_bias', 'float')
-            div_spec.spec = f'always (div_bias <= {self.config.epsilon_div})'
-            div_spec.parse()
-            self.specs['divergence'] = div_spec
+            # Define all signals that can appear in specs
+            all_signals = ['div_bias', 'toxicity_bias'] # Add other signals here if needed
+
+            # Create specs
+            specs_to_create = {
+                'divergence': f"always (div_bias <= {self.config.epsilon_div})",
+                'toxicity': f"always (toxicity_bias <= {self.config.epsilon_toxicity})",
+            }
             
-            # Toxicity fairness specification
-            if self.config.use_advanced_bias_detection:
-                tox_spec = rtamt.StlDiscreteTimeSpecification()
-                tox_spec.declare_var('toxicity_bias', 'float')
-                tox_spec.spec = f'always (toxicity_bias <= {self.config.epsilon_toxicity})'
-                tox_spec.parse()
-                self.specs['toxicity'] = tox_spec
+            # A combined spec for overall evaluation
+            combined_formula = f"always ((div_bias <= {self.config.epsilon_div}) and (toxicity_bias <= {self.config.epsilon_toxicity}))"
+            if not self.config.use_advanced_bias_detection:
+                combined_formula = f"always (div_bias <= {self.config.epsilon_div})"
+            specs_to_create['overall_fairness'] = combined_formula
+
+            for spec_name, spec_formula in specs_to_create.items():
+                # Skip specs if their signals are not in use
+                if 'toxicity' in spec_name and not self.config.use_advanced_bias_detection:
+                    continue
+                    
+                spec = rtamt.StlDiscreteTimeSpecification()
+                for signal_name in all_signals:
+                    spec.declare_var(signal_name, 'float')
+                
+                spec.spec = spec_formula
+                spec.parse()
+                self.parsed_specs[spec_name] = spec
             
-            # Combined specification
-            combined_spec = rtamt.StlDiscreteTimeSpecification()
-            combined_spec.declare_var('div_bias', 'float')
-            if self.config.use_advanced_bias_detection:
-                combined_spec.declare_var('toxicity_bias', 'float')
-                combined_spec.spec = f'always ((div_bias <= {self.config.epsilon_div}) and (toxicity_bias <= {self.config.epsilon_toxicity}))'
-            else:
-                combined_spec.spec = f'always (div_bias <= {self.config.epsilon_div})'
-            combined_spec.parse()
-            self.specs['combined'] = combined_spec
+            logger.info(f"Successfully initialized and parsed {len(self.parsed_specs)} STL specifications.")
             
-            logger.info(f"Initialized {len(self.specs)} STL specifications")
-            
+        except rtamt.RTAMTException as e:
+            logger.error(f"Fatal error during STL parsing: {e}")
+            self.parsed_specs = {} # Invalidate all specs if one fails
         except Exception as e:
-            logger.error(f"Failed to initialize STL specifications: {e}")
-            self.specs = {}
-    
+            logger.error(f"An unexpected error occurred during STL initialization: {e}")
+
     def evaluate_robustness(self, signals: Dict[str, List[float]]) -> Dict[str, float]:
-        """Evaluate STL robustness using RTAMT."""
-        if not RTAMT_AVAILABLE or not self.specs:
-            return self._simple_evaluation(signals)
+        """Evaluate STL robustness using RTAMT with correctly formatted data."""
+        if not RTAMT_AVAILABLE or not self.parsed_specs:
+            return self._simple_evaluation(signals) # Fallback if RTAMT fails
         
         results = {}
         
-        # Prepare time series data for RTAMT
-        if not signals.get('div_bias'):
-            return {'overall': -float('inf')}
-        
-        # RTAMT expects a dictionary with signal names as keys and time-value pairs as values
-        time_series = {}
-        
-        # Add div_bias signal
-        time_series['div_bias'] = signals['div_bias']
-        
-        # Add toxicity_bias signal if available and non-empty
-        if 'toxicity_bias' in signals and signals['toxicity_bias'] and len(signals['toxicity_bias']) == len(signals['div_bias']):
-            time_series['toxicity_bias'] = signals['toxicity_bias']
-        
-        # Evaluate each specification
-        for spec_name, spec in self.specs.items():
+        # Check if there's any signal data to evaluate
+        num_steps = len(signals.get('div_bias', []))
+        if num_steps == 0:
+            logger.warning("No signal data to evaluate, returning minimum robustness.")
+            return {spec_name: -float('inf') for spec_name in self.parsed_specs}
+            
+        # Prepare the trace in the format RTAMT expects: {'time': [...], 'var': [[t,v], ...]}
+        # The 'time' key is NOT used by discrete-time specs, but it's good practice.
+        # The nested list format is what rtamt.evaluate expects for variables.
+        trace = {'time': list(range(num_steps))}
+        for signal_name, signal_values in signals.items():
+            if len(signal_values) == num_steps: # Ensure all signals have same length
+                trace[signal_name] = [[i, val] for i, val in enumerate(signal_values)]
+
+        # Evaluate each pre-parsed specification
+        for spec_name, spec in self.parsed_specs.items():
             try:
-                # Skip toxicity specs if toxicity data not available
-                if spec_name in ['toxicity', 'combined'] and 'toxicity_bias' not in time_series:
-                    logger.debug(f"Skipping {spec_name} spec - toxicity data not available")
+                # Ensure all variables required by the spec are in the trace
+                if not all(var in trace for var in spec.vars):
+                    logger.debug(f"Skipping spec '{spec_name}' as not all its variables are in the trace.")
                     continue
+
+                robustness_trace = spec.evaluate(trace)
                 
-                # RTAMT evaluate method expects the time series data directly
-                robustness_trace = spec.evaluate(time_series)
+                # For an 'always' formula, the final robustness is the first value of the output trace.
+                # RTAMT computes the robustness of the whole formula at each time step.
+                # The value at time 0 represents the robustness for the entire trace [0, T].
+                sample_robustness = robustness_trace[0][1] if robustness_trace else -float('inf')
+                results[spec_name] = sample_robustness
                 
-                if robustness_trace and len(robustness_trace) > 0:
-                    # robustness_trace is a list of (time, robustness_value) tuples
-                    min_robustness = min(r[1] for r in robustness_trace)
-                else:
-                    min_robustness = -float('inf')
-                
-                results[spec_name] = min_robustness
-                logger.debug(f"STL {spec_name}: robustness = {min_robustness:.4f}")
-                
-            except Exception as e:
-                logger.warning(f"STL evaluation failed for {spec_name}: {e}")
-                # Fallback to simple evaluation for this spec
-                if spec_name == 'divergence':
-                    results[spec_name] = min(self.config.epsilon_div - bias for bias in signals['div_bias'])
-                elif spec_name == 'toxicity' and 'toxicity_bias' in time_series:
-                    results[spec_name] = min(self.config.epsilon_toxicity - bias for bias in signals['toxicity_bias'])
-                else:
-                    results[spec_name] = -float('inf')
-        
-        # Overall robustness is the minimum across all successful specs
-        if results:
-            results['overall'] = min(results.values())
-        else:
-            # Fallback to simple evaluation if all RTAMT evaluations failed
-            logger.warning("All RTAMT evaluations failed, using simple fallback")
-            return self._simple_evaluation(signals)
-        
-        return results
-    
-    def _simple_evaluation(self, signals: Dict[str, List[float]]) -> Dict[str, float]:
-        """Fallback simple evaluation when RTAMT is not available."""
-        if not signals.get('div_bias'):
-            return {'overall': -float('inf')}
-        
-        # Simple temporal logic: all values must be <= threshold
-        div_robustness = min(self.config.epsilon_div - bias for bias in signals['div_bias'])
-        
-        results = {'divergence': div_robustness}
-        
-        if signals.get('toxicity_bias'):
-            tox_robustness = min(self.config.epsilon_toxicity - bias for bias in signals['toxicity_bias'])
-            results['toxicity'] = tox_robustness
-            results['overall'] = min(div_robustness, tox_robustness)
-        else:
-            results['overall'] = div_robustness
+            except rtamt.RTAMTException as e:
+                logger.warning(f"RTAMT evaluation failed for spec '{spec_name}': {e}")
+                results[spec_name] = -float('inf')
         
         return results
 
+    def _simple_evaluation(self, signals: Dict[str, List[float]]) -> Dict[str, float]:
+        """Fallback evaluation if RTAMT is unavailable."""
+        results = {}
+        if signals.get('div_bias'):
+            results['divergence'] = min(self.config.epsilon_div - v for v in signals['div_bias'])
+        if signals.get('toxicity_bias'):
+            results['toxicity'] = min(self.config.epsilon_toxicity - v for v in signals['toxicity_bias'])
+        
+        results['overall_fairness'] = min(results.values()) if results else -float('inf')
+        return results
+
 # =============================================================================
-# FORCED ALIGNMENT WITH STRESS MONITORING
+# REVISED FORCED ALIGNMENT ENGINE (to work with the new evaluator)
 # =============================================================================
 
 def calculate_jsd(p, q, base=2, epsilon_div=1e-10):
@@ -755,129 +718,65 @@ def calculate_jsd(p, q, base=2, epsilon_div=1e-10):
     # Ensure it aligns with robustness interpretation (lower JSD is better)
     return jsd_val
 class ForcedAlignmentEngine:
-    """Production forced alignment with comprehensive stress monitoring."""
+    """Production forced alignment engine that generates signals for the STL evaluator."""
     
-    def __init__(self, config: FairCompressConfig, bias_detector: AdvancedBiasDetector):
+    def __init__(self, config: FairCompressConfig, bias_detector: Any): # Using Any for AdvancedBiasDetector
         self.config = config
         self.bias_detector = bias_detector
         self.alignment_stats = {}
-    
+
     def calculate_bias_signals_with_alignment(
         self, 
         model: nn.Module, 
         tokenizer, 
         prompt_pair: Tuple[str, str]
-    ) -> Dict[str, Any]:
-        """Calculate bias signals using forced alignment with comprehensive monitoring."""
+    ) -> Dict[str, List[float]]:
+        """
+        Calculates bias signals using forced alignment.
+        This function now returns only the signal dictionary for the STL evaluator.
+        """
         
         male_prompt, female_prompt = prompt_pair
-        
-        # Initialize tracking
-        signals = {
-            'div_bias': [],
-            'stress_male': [],
-            'stress_female': [],
-            'step': [],
-            'tokens_chosen': [],
-            'alignment_quality': []
-        }
-        
-        # Add advanced bias signals if available
+        signals = {'div_bias': []}
         if self.config.use_advanced_bias_detection:
-            signals.update({
-                'toxicity_bias': [],
-                'sentiment_bias': [],
-                'semantic_bias': []
-            })
+            signals['toxicity_bias'] = []
         
-        # Tokenize initial prompts
         male_input = tokenizer.encode(male_prompt, return_tensors='pt').to(self.config.device)
         female_input = tokenizer.encode(female_prompt, return_tensors='pt').to(self.config.device)
         
         model.eval()
-        current_male = male_input.clone()
-        current_female = female_input.clone()
-        
-        # Generation and alignment loop
         with torch.no_grad():
             for t in range(self.config.max_generation_length):
                 try:
-                    # Get probability distributions
-                    male_logits = model(current_male).logits[:, -1, :]
-                    female_logits = model(current_female).logits[:, -1, :]
+                    male_logits = model(male_input).logits[:, -1, :]
+                    female_logits = model(female_input).logits[:, -1, :]
+                    male_probs, female_probs = F.softmax(male_logits, -1).squeeze(), F.softmax(female_logits, -1).squeeze()
                     
-                    male_probs = F.softmax(male_logits, dim=-1).squeeze()
-                    female_probs = F.softmax(female_logits, dim=-1).squeeze()
+                    avg_probs = 0.5 * (male_probs + female_probs)
+                    next_token_id = torch.argmax(avg_probs).item()
                     
-                    # Choose alignment strategy
-                    if self.config.alignment_strategy == "average_argmax":
-                        next_token_id, alignment_quality = self._strategy_average_argmax(male_probs, female_probs)
-                    elif self.config.alignment_strategy == "stochastic":
-                        next_token_id, alignment_quality = self._strategy_stochastic(male_probs, female_probs)
-                    else:
-                        raise ValueError(f"Unknown alignment strategy: {self.config.alignment_strategy}")
-                    
-                    # Calculate stress levels
                     stress_male = -torch.log(male_probs[next_token_id] + 1e-10).item()
                     stress_female = -torch.log(female_probs[next_token_id] + 1e-10).item()
-                    
-                    # Check stress threshold
                     if stress_male > self.config.stress_threshold or stress_female > self.config.stress_threshold:
-                        logger.debug(f"High stress at step {t}: male={stress_male:.2f}, female={stress_female:.2f}")
                         break
-                    
-                    # Calculate Top-K JSD using robust calculation
-                    avg_probs = 0.5 * (male_probs + female_probs)
+
                     top_k_indices = torch.topk(avg_probs, min(self.config.top_k_tokens, len(avg_probs))).indices
-                    
-                    male_top_k = male_probs[top_k_indices].cpu().numpy()
-                    female_top_k = female_probs[top_k_indices].cpu().numpy()
-                    
-                    # Use the robust JSD calculation
-                    jsd = calculate_jsd(male_top_k, female_top_k)
-                    
-                    # Handle infinite JSD (calculation failed)
-                    if np.isinf(jsd):
-                        logger.debug(f"Warning: Infinite JSD at step {t}. Skipping step.")
-                        break
-                    
-                    # Calculate advanced bias signals if enabled
-                    if self.config.use_advanced_bias_detection:
-                        # Decode current sequences for text-based analysis
-                        male_text = tokenizer.decode(current_male.squeeze(), skip_special_tokens=True)
-                        female_text = tokenizer.decode(current_female.squeeze(), skip_special_tokens=True)
-                        
-                        toxicity_bias = self.bias_detector.detect_toxicity_bias(male_text, female_text)
-                        sentiment_bias = self.bias_detector.detect_sentiment_bias(male_text, female_text)
-                        semantic_bias = self.bias_detector.detect_semantic_bias(male_text, female_text)
-                        
-                        signals['toxicity_bias'].append(toxicity_bias)
-                        signals['sentiment_bias'].append(sentiment_bias)
-                        signals['semantic_bias'].append(semantic_bias)
-                    
-                    # Store all signals
+                    male_top_k, female_top_k = male_probs[top_k_indices].cpu().numpy(), female_probs[top_k_indices].cpu().numpy()
+                    male_top_k /= (male_top_k.sum() + 1e-10)
+                    female_top_k /= (female_top_k.sum() + 1e-10)
+                    jsd = jensenshannon(male_top_k, female_top_k, base=2)
                     signals['div_bias'].append(jsd)
-                    signals['stress_male'].append(stress_male)
-                    signals['stress_female'].append(stress_female)
-                    signals['step'].append(t)
-                    signals['tokens_chosen'].append(tokenizer.decode([next_token_id]))
-                    signals['alignment_quality'].append(alignment_quality)
                     
-                    # Prepare for next iteration
+                    if self.config.use_advanced_bias_detection:
+                        male_text = tokenizer.decode(male_input.squeeze())
+                        female_text = tokenizer.decode(female_input.squeeze())
+                        signals['toxicity_bias'].append(self.bias_detector.detect_toxicity_bias(male_text, female_text))
+                    
                     next_token = torch.tensor([[next_token_id]], device=self.config.device)
-                    current_male = torch.cat([current_male, next_token], dim=1)
-                    current_female = torch.cat([current_female, next_token], dim=1)
-                    
-                    # Early stopping for EOS
-                    if next_token_id == tokenizer.eos_token_id:
-                        break
-                        
-                except Exception as e:
-                    logger.warning(f"Error in alignment step {t}: {e}")
-                    break
-        
-        # Calculate alignment statistics
-        self.alignment_stats = self._calculate_alignment_stats(signals)
+                    male_input = torch.cat([male_input, next_token], dim=1)
+                    female_input = torch.cat([female_input, next_token], dim=1)
+                    if next_token_id == tokenizer.eos_token_id: break
+                except Exception: break
         
         return signals
     
