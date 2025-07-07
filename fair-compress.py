@@ -667,30 +667,53 @@ class ProductionSTLEvaluator:
         if not signals.get('div_bias'):
             return {'overall': -float('inf')}
         
-        time_series = {
-            'time': list(range(len(signals['div_bias']))),
-            'div_bias': [[i, v] for i, v in enumerate(signals['div_bias'])]
-        }
+        # RTAMT expects a dictionary with signal names as keys and time-value pairs as values
+        time_series = {}
         
-        if 'toxicity_bias' in signals and signals['toxicity_bias']:
-            time_series['toxicity_bias'] = [[i, v] for i, v in enumerate(signals['toxicity_bias'])]
+        # Add div_bias signal
+        time_series['div_bias'] = signals['div_bias']
+        
+        # Add toxicity_bias signal if available and non-empty
+        if 'toxicity_bias' in signals and signals['toxicity_bias'] and len(signals['toxicity_bias']) == len(signals['div_bias']):
+            time_series['toxicity_bias'] = signals['toxicity_bias']
         
         # Evaluate each specification
         for spec_name, spec in self.specs.items():
             try:
-                if spec_name == 'toxicity' and 'toxicity_bias' not in time_series:
+                # Skip toxicity specs if toxicity data not available
+                if spec_name in ['toxicity', 'combined'] and 'toxicity_bias' not in time_series:
+                    logger.debug(f"Skipping {spec_name} spec - toxicity data not available")
                     continue
                 
+                # RTAMT evaluate method expects the time series data directly
                 robustness_trace = spec.evaluate(time_series)
-                min_robustness = min(r[1] for r in robustness_trace) if robustness_trace else -float('inf')
+                
+                if robustness_trace and len(robustness_trace) > 0:
+                    # robustness_trace is a list of (time, robustness_value) tuples
+                    min_robustness = min(r[1] for r in robustness_trace)
+                else:
+                    min_robustness = -float('inf')
+                
                 results[spec_name] = min_robustness
+                logger.debug(f"STL {spec_name}: robustness = {min_robustness:.4f}")
                 
             except Exception as e:
                 logger.warning(f"STL evaluation failed for {spec_name}: {e}")
-                results[spec_name] = -float('inf')
+                # Fallback to simple evaluation for this spec
+                if spec_name == 'divergence':
+                    results[spec_name] = min(self.config.epsilon_div - bias for bias in signals['div_bias'])
+                elif spec_name == 'toxicity' and 'toxicity_bias' in time_series:
+                    results[spec_name] = min(self.config.epsilon_toxicity - bias for bias in signals['toxicity_bias'])
+                else:
+                    results[spec_name] = -float('inf')
         
-        # Overall robustness is the minimum across all specs
-        results['overall'] = min(results.values()) if results else -float('inf')
+        # Overall robustness is the minimum across all successful specs
+        if results:
+            results['overall'] = min(results.values())
+        else:
+            # Fallback to simple evaluation if all RTAMT evaluations failed
+            logger.warning("All RTAMT evaluations failed, using simple fallback")
+            return self._simple_evaluation(signals)
         
         return results
     
