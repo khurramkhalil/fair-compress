@@ -322,15 +322,57 @@ class ProductionCompressionManager:
         logger.info(f"Identified {len(self.target_modules)} target modules for compression")
     
     def _identify_target_modules(self) -> List[str]:
-        """Identify modules suitable for compression."""
+        """Identify modules suitable for compression in a generic transformer model."""
         targets = []
+        
+        # Define common types of layers that contain the core linear transformations
+        target_layer_types = (nn.Linear,)
+        
+        # Define typical embedding/head layers to exclude (by name or type)
+        excluded_types = (nn.Embedding,)
+        excluded_names = ['lm_head'] # Exclude the final output layer for now, it often needs higher precision
+
         for name, module in self.model.named_modules():
-            if isinstance(module, nn.Linear):
-                # Target attention and MLP components in transformers
-                if any(key in name for key in ['c_attn', 'c_proj', 'c_fc', 'q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj']):
+            
+            # Skip embedding layers and the final head layer
+            if isinstance(module, excluded_types) or name in excluded_names:
+                continue
+            
+            if isinstance(module, target_layer_types):
+                # Heuristic check: Avoid very small layers that might be control structures
+                if hasattr(module, 'weight') and module.weight.numel() > 1024: 
                     targets.append(name)
+        
+        # Handle cases where lm_head might be tied to embeddings and not explicitly named 'lm_head'
+        # If using HuggingFace models, we can often rely on the structure
+        if hasattr(self.model, 'get_output_embeddings'):
+            output_embeddings_module = self.model.get_output_embeddings()
+            if output_embeddings_module is not None:
+                # Find the name of the output embedding module and exclude it if it's a linear layer
+                for name, module in self.model.named_modules():
+                    if module is output_embeddings_module and name in targets:
+                        targets.remove(name)
+                        logger.debug(f"Excluded output embedding layer: {name}")
+                        break
+                        
+        logger.info(f"Identified {len(targets)} target modules for generic compression.")
         return targets
     
+    def _get_module_by_name(self, name):
+            """Helper to access nested modules by name."""
+            if '.' not in name:
+                return self.model, name
+            
+            parent_path = '.'.join(name.split('.')[:-1])
+            child_name = name.split('.')[-1]
+            
+            # Use getattr repeatedly to navigate the structure
+            parent = self.model
+            for part in parent_path.split('.'):
+                parent = getattr(parent, part)
+                
+            return parent, child_name
+
     def apply_compression(self, bits: int, pruning_ratio: float) -> Dict[str, Any]:
         """Apply compression and return detailed statistics."""
         if self.is_compressed:
@@ -341,33 +383,30 @@ class ProductionCompressionManager:
         total_params_after = 0
         
         for name in self.target_modules:
-            module = dict(self.model.named_modules())[name]
-            if isinstance(module, nn.Linear):
+            # Robustly get the parent module and the child attribute name
+            parent_module, child_name = self._get_module_by_name(name)
+            original_module = getattr(parent_module, child_name)
+            
+            if isinstance(original_module, nn.Linear):
                 # Store original
-                self.original_modules[name] = module
+                self.original_modules[name] = original_module
                 
                 # Count parameters before
-                params_before = module.weight.numel()
-                if module.bias is not None:
-                    params_before += module.bias.numel()
+                params_before = original_module.weight.numel()
+                if original_module.bias is not None:
+                    params_before += original_module.bias.numel()
                 total_params_before += params_before
                 
-                # Create compressed module
-                compressed = AdvancedQuantizedLinear(module, bits, pruning_ratio)
+                # Create and replace module
+                compressed = AdvancedQuantizedLinear(original_module, bits, pruning_ratio)
+                setattr(parent_module, child_name, compressed)
                 
-                # Count effective parameters after
+                # Count effective parameters after (same as before)
                 weight_mask = (compressed.weight != 0).float()
                 effective_params = weight_mask.sum().item()
                 if compressed.bias is not None:
                     effective_params += compressed.bias.numel()
                 total_params_after += effective_params
-                
-                # Replace module
-                parent_name = '.'.join(name.split('.')[:-1])
-                child_name = name.split('.')[-1]
-                if parent_name:
-                    parent = dict(self.model.named_modules())[parent_name]
-                    setattr(parent, child_name, compressed)
                 
                 self.compressed_modules[name] = compressed
         
@@ -395,11 +434,8 @@ class ProductionCompressionManager:
     def restore_original(self):
         """Restore all original modules."""
         for name, original_module in self.original_modules.items():
-            parent_name = '.'.join(name.split('.')[:-1])
-            child_name = name.split('.')[-1]
-            if parent_name:
-                parent = dict(self.model.named_modules())[parent_name]
-                setattr(parent, child_name, original_module)
+            parent_module, child_name = self._get_module_by_name(name)
+            setattr(parent_module, child_name, original_module)
         
         self.compressed_modules.clear()
         self.compression_stats.clear()
@@ -1606,8 +1642,8 @@ class FairCompressSTLSystem:
         
         # Load model and tokenizer
         self.logger.info(f"Loading model: {self.config.model_name}")
-        self.model = GPT2LMHeadModel.from_pretrained(self.config.model_name).to(self.config.device)
-        self.tokenizer = GPT2TokenizerFast.from_pretrained(self.config.model_name)
+        self.model = AutoModelForCausalLM.from_pretrained(self.config.model_name).to(self.config.device)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.config.model_name)
         
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
